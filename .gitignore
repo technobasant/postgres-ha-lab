@@ -1,0 +1,23 @@
+# Vagrant / QEMU runtime state and boxes
+.vagrant/
+*.box
+*.qcow2
+*.img
+
+# Python / Ansible control-node environment
+.venv/
+__pycache__/
+*.pyc
+*.retry
+
+# Certificates and keys are generated on the control node — never committed
+**/ansible/artifacts/
+*.key
+*.pem
+*.crt
+*.csr
+*.srl
+
+# Logs and OS noise
+*.log
+.DS_Store

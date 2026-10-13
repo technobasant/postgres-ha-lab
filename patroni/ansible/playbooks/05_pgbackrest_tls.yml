@@ -1,0 +1,219 @@
+---
+# =============================================================================
+# Convert the repo<->database link from SSH to mutual TLS.
+#
+# Same transport as part 1 of this series, and the better answer for a cluster:
+# TLS needs no shell account on the peers, and authorisation is an explicit CN
+# allow-list (`tls-server-auth`) rather than "whatever the postgres unix user
+# can reach over ssh".
+#
+# The allow-list is the part to read twice. On the repo host each database CN
+# is granted the stanza; on a database host the repo's CN is granted it back.
+# A cert signed by the CA but missing from the list authenticates fine and is
+# then refused — which is the behaviour you want, and an error message that
+# reads like a handshake failure when you first meet it.
+# =============================================================================
+
+# TCG guests drift badly — these were 76 minutes behind the control node — and
+# chrony slews rather than steps, so it never catches up on its own. TLS is
+# time-sensitive: a certificate issued on the Mac is "not yet valid" from the
+# guest's point of view, and the failure surfaces as a misleading
+# `sslv3 alert bad certificate` from the peer rather than anything about clocks.
+# Step the clock before issuing certificates, not after.
+- name: Step guest clocks before anything touches certificates
+  hosts: pgbackrest_repo:patroni_cluster
+  become: true
+  gather_facts: false
+  tasks:
+    - name: chronyd running
+      ansible.builtin.systemd:
+        name: chronyd
+        enabled: true
+        state: started
+
+    - name: Force an immediate step
+      ansible.builtin.command: chronyc -a makestep
+      register: makestep
+      changed_when: true
+
+    - name: Report offset after stepping
+      ansible.builtin.command: date -u +%s
+      register: guest_epoch
+      changed_when: false
+
+    - name: Fail if still skewed from the control node
+      ansible.builtin.assert:
+        that: "(guest_epoch.stdout | int - ansible_date_time_epoch | int) | abs < 120"
+        fail_msg: >-
+          {{ inventory_hostname }} is {{ (guest_epoch.stdout | int - ansible_date_time_epoch | int) | abs }}s
+          from the control node; certificates will not validate.
+        success_msg: "{{ inventory_hostname }} clock within 120s of the control node"
+      vars:
+        ansible_date_time_epoch: "{{ lookup('pipe', 'date -u +%s') }}"
+
+- name: Issue and distribute certificates
+  hosts: pgbackrest_repo:patroni_cluster
+  become: true
+  gather_facts: false
+  roles:
+    - pgbackrest_certs
+
+- name: TLS server on the repository host
+  hosts: pgbackrest_repo
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Repo pgbackrest.conf with TLS server
+      ansible.builtin.copy:
+        dest: "{{ pgbackrest_conf_file }}"
+        owner: "{{ pgbackrest_user }}"
+        group: "{{ pgbackrest_group }}"
+        mode: "0640"
+        content: |
+          # Managed by Ansible — 05_pgbackrest_tls.yml
+          [global]
+          repo1-path={{ pgbackrest_repo_path }}
+          repo1-retention-full=2
+          log-path={{ pgbackrest_log_path }}
+          log-level-console=info
+          log-level-file=detail
+          start-fast=y
+
+          tls-server-address=*
+          tls-server-port={{ pgbackrest_tls_port }}
+          tls-server-cert-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.crt
+          tls-server-key-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.key
+          tls-server-ca-file={{ pgbackrest_cert_dir }}/ca.crt
+          {% for h in groups['patroni_cluster'] %}
+          tls-server-auth={{ h }}={{ pgbackrest_stanza }}
+          {% endfor %}
+
+          [{{ pgbackrest_stanza }}]
+          {% for m in patroni_members %}
+          pg{{ loop.index }}-host={{ m.ip }}
+          pg{{ loop.index }}-host-type=tls
+          pg{{ loop.index }}-host-port={{ pgbackrest_tls_port }}
+          pg{{ loop.index }}-host-ca-file={{ pgbackrest_cert_dir }}/ca.crt
+          pg{{ loop.index }}-host-cert-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.crt
+          pg{{ loop.index }}-host-key-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.key
+          pg{{ loop.index }}-path={{ pg_data_dir }}
+          pg{{ loop.index }}-port={{ pg_port }}
+          {% endfor %}
+      notify: restart pgbackrest tls
+
+    - name: pgBackRest TLS server unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pgbackrest.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=pgBackRest TLS server
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ pgbackrest_user }}
+          ExecStart=/usr/bin/pgbackrest server
+          ExecReload=/bin/kill -HUP $MAINPID
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart pgbackrest tls
+
+    - name: Open the TLS port
+      ansible.posix.firewalld:
+        port: "{{ pgbackrest_tls_port }}/tcp"
+        permanent: true
+        immediate: true
+        state: enabled
+
+    - name: Enable the TLS server
+      ansible.builtin.systemd:
+        name: pgbackrest
+        enabled: true
+        state: started
+        daemon_reload: true
+
+  handlers:
+    - name: restart pgbackrest tls
+      ansible.builtin.systemd:
+        name: pgbackrest
+        state: restarted
+        daemon_reload: true
+
+- name: TLS clients on the database hosts
+  hosts: patroni_cluster
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Database-host pgbackrest.conf over TLS
+      ansible.builtin.copy:
+        dest: "{{ pgbackrest_conf_file }}"
+        owner: "{{ pgbackrest_user }}"
+        group: "{{ pgbackrest_group }}"
+        mode: "0640"
+        content: |
+          # Managed by Ansible — 05_pgbackrest_tls.yml
+          [global]
+          repo1-host={{ repo_lab_ip }}
+          repo1-host-type=tls
+          repo1-host-port={{ pgbackrest_tls_port }}
+          repo1-host-ca-file={{ pgbackrest_cert_dir }}/ca.crt
+          repo1-host-cert-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.crt
+          repo1-host-key-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.key
+          log-path={{ pgbackrest_log_path }}
+          log-level-console=info
+          log-level-file=detail
+          archive-async=y
+          spool-path={{ pgbackrest_spool_path }}
+
+          # The repo host reaches back for backups, so each database node runs a
+          # TLS server too and authorises the repo's CN.
+          tls-server-address=*
+          tls-server-port={{ pgbackrest_tls_port }}
+          tls-server-cert-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.crt
+          tls-server-key-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.key
+          tls-server-ca-file={{ pgbackrest_cert_dir }}/ca.crt
+          tls-server-auth={{ repo_host }}={{ pgbackrest_stanza }}
+
+          [{{ pgbackrest_stanza }}]
+          pg1-path={{ pg_data_dir }}
+          pg1-port={{ pg_port }}
+
+    - name: pgBackRest TLS server unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/pgbackrest.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=pgBackRest TLS server
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ pgbackrest_user }}
+          ExecStart=/usr/bin/pgbackrest server
+          ExecReload=/bin/kill -HUP $MAINPID
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Open the TLS port
+      ansible.posix.firewalld:
+        port: "{{ pgbackrest_tls_port }}/tcp"
+        permanent: true
+        immediate: true
+        state: enabled
+
+    - name: Enable the TLS server
+      ansible.builtin.systemd:
+        name: pgbackrest
+        enabled: true
+        state: restarted
+        daemon_reload: true

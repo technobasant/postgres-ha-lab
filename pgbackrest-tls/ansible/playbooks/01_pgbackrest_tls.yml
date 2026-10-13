@@ -1,0 +1,165 @@
+---
+- name: Install pgBackRest and create user/dirs
+  hosts: pgbackrest_servers:pgbackrest_clients
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Install packages and users
+      ansible.builtin.include_role:
+        name: pgbackrest_repo
+        tasks_from: install.yml
+
+- name: Generate TLS certificates on the control node
+  hosts: localhost
+  gather_facts: false
+  become: false
+  connection: local
+  vars:
+    pgbackrest_cert_hosts: "{{ groups['pgbackrest_servers'] + groups['pgbackrest_clients'] }}"
+  tasks:
+    - name: Ensure cert artifact directory
+      ansible.builtin.file:
+        path: "{{ pgbackrest_cert_artifact_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Create lab CA key
+      ansible.builtin.command:
+        cmd: openssl genrsa -out {{ pgbackrest_cert_artifact_dir }}/ca.key 4096
+        creates: "{{ pgbackrest_cert_artifact_dir }}/ca.key"
+
+    - name: Create lab CA certificate
+      ansible.builtin.command:
+        cmd: >
+          openssl req -new -x509 -days {{ pgbackrest_cert_days | default(3650) }}
+          -key {{ pgbackrest_cert_artifact_dir }}/ca.key
+          -out {{ pgbackrest_cert_artifact_dir }}/ca.crt
+          -subj "/O={{ pgbackrest_cert_subj_org | default('Lab') }}/CN={{ pgbackrest_ca_cn | default('lab-pgbackrest-ca') }}"
+        creates: "{{ pgbackrest_cert_artifact_dir }}/ca.crt"
+
+    - name: Restrict CA key mode
+      ansible.builtin.file:
+        path: "{{ pgbackrest_cert_artifact_dir }}/ca.key"
+        mode: "0600"
+
+    - name: Generate per-host key, CSR, and signed cert
+      ansible.builtin.shell: |
+        set -euo pipefail
+        HOST="{{ item }}"
+        DIR="{{ pgbackrest_cert_artifact_dir }}"
+        IP="{{ hostvars[item].lab_ip }}"
+        openssl genrsa -out "${DIR}/${HOST}.key" 2048
+        openssl req -new -key "${DIR}/${HOST}.key" -out "${DIR}/${HOST}.csr" \
+          -subj "/O=Lab/CN=${HOST}"
+        printf '%s\n' \
+          'basicConstraints=CA:FALSE' \
+          'keyUsage=digitalSignature,keyEncipherment' \
+          'extendedKeyUsage=serverAuth,clientAuth' \
+          "subjectAltName=DNS:${HOST},IP:${IP}" \
+          > "${DIR}/${HOST}.ext"
+        openssl x509 -req -in "${DIR}/${HOST}.csr" \
+          -CA "${DIR}/ca.crt" -CAkey "${DIR}/ca.key" -CAcreateserial \
+          -out "${DIR}/${HOST}.crt" -days 3650 \
+          -extfile "${DIR}/${HOST}.ext"
+        chmod 600 "${DIR}/${HOST}.key"
+      args:
+        creates: "{{ pgbackrest_cert_artifact_dir }}/{{ item }}.crt"
+      loop: "{{ pgbackrest_cert_hosts }}"
+
+- name: Distribute TLS certificates to lab hosts
+  hosts: pgbackrest_servers:pgbackrest_clients
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Ensure remote cert directory
+      ansible.builtin.file:
+        path: "{{ pgbackrest_cert_dir }}"
+        state: directory
+        owner: "{{ pgbackrest_user }}"
+        group: "{{ pgbackrest_group }}"
+        mode: "0750"
+
+    - name: Install CA certificate
+      ansible.builtin.copy:
+        src: "{{ pgbackrest_cert_artifact_dir }}/ca.crt"
+        dest: "{{ pgbackrest_cert_dir }}/ca.crt"
+        owner: "{{ pgbackrest_user }}"
+        group: "{{ pgbackrest_group }}"
+        mode: "0644"
+
+    - name: Install host certificate
+      ansible.builtin.copy:
+        src: "{{ pgbackrest_cert_artifact_dir }}/{{ inventory_hostname }}.crt"
+        dest: "{{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.crt"
+        owner: "{{ pgbackrest_user }}"
+        group: "{{ pgbackrest_group }}"
+        mode: "0644"
+
+    - name: Install host private key
+      ansible.builtin.copy:
+        src: "{{ pgbackrest_cert_artifact_dir }}/{{ inventory_hostname }}.key"
+        dest: "{{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.key"
+        owner: "{{ pgbackrest_user }}"
+        group: "{{ pgbackrest_group }}"
+        mode: "0600"
+
+- name: Open firewall on dedicated repo host
+  hosts: pgbackrest_servers
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Firewall for TLS port
+      ansible.builtin.include_role:
+        name: pgbackrest_repo
+        tasks_from: firewall_server.yml
+
+- name: Apply pgBackRest TLS configuration and start servers
+  hosts: pgbackrest_servers:pgbackrest_clients
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Configure and start TLS server
+      ansible.builtin.include_role:
+        name: pgbackrest_repo
+        tasks_from: configure.yml
+
+- name: Prove TLS from client to central repo
+  hosts: pg1
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Wait for TLS port on backup host
+      ansible.builtin.wait_for:
+        host: "{{ backup_lab_ip }}"
+        port: "{{ pgbackrest_tls_port }}"
+        timeout: 60
+
+    - name: pgBackRest server-ping to central TLS repo
+      ansible.builtin.command:
+        argv:
+          - pgbackrest
+          - server-ping
+          - "--tls-server-address={{ backup_host }}"
+          - "--tls-server-port={{ pgbackrest_tls_port }}"
+      become_user: "{{ pgbackrest_user }}"
+      register: server_ping
+      changed_when: false
+
+    - name: Show server-ping result
+      ansible.builtin.debug:
+        var: server_ping.stdout_lines
+
+    - name: Mutual-TLS handshake with client certificate
+      ansible.builtin.shell: |
+        set -euo pipefail
+        echo | openssl s_client -connect {{ backup_lab_ip }}:{{ pgbackrest_tls_port }} \
+          -cert {{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.crt \
+          -key {{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.key \
+          -CAfile {{ pgbackrest_cert_dir }}/ca.crt \
+          -servername {{ backup_host }} 2>/dev/null | grep -E 'Verify return code:|subject=|issuer='
+      register: mtls
+      changed_when: false
+
+    - name: Show mTLS result
+      ansible.builtin.debug:
+        var: mtls.stdout_lines

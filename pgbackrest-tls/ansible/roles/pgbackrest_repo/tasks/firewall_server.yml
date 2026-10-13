@@ -1,0 +1,17 @@
+---
+- name: Ensure firewalld is running
+  ansible.builtin.service:
+    name: firewalld
+    state: started
+    enabled: true
+
+- name: Open pgBackRest TLS port on server
+  ansible.builtin.command: firewall-cmd --permanent --add-port={{ pgbackrest_tls_port }}/tcp
+  register: fw_perm
+  changed_when: false
+  failed_when: false
+
+- name: Reload firewalld
+  ansible.builtin.command: firewall-cmd --reload
+  changed_when: false
+  failed_when: false

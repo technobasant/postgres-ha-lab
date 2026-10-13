@@ -1,0 +1,5 @@
+---
+# defaults file for pgbackrest_certs
+pgbackrest_cert_days: 3650
+pgbackrest_cert_subj_org: Lab
+pgbackrest_ca_cn: lab-pgbackrest-ca

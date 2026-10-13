@@ -1,0 +1,45 @@
+---
+# Shared lab defaults for wiring pgBackRest into the Patroni cluster.
+pgbackrest_user: postgres
+pgbackrest_group: postgres
+pgbackrest_conf_file: /etc/pgbackrest.conf
+pgbackrest_repo_path: /var/lib/pgbackrest
+pgbackrest_log_path: /var/log/pgbackrest
+pgbackrest_spool_path: /var/spool/pgbackrest
+
+# One stanza for the whole cluster, named for the Patroni scope. pgBackRest
+# thinks in stanzas, Patroni thinks in scopes; keeping the names identical stops
+# a later reader wondering whether they are the same thing. They are.
+pgbackrest_stanza: pg18lab
+patroni_scope: pg18lab
+
+repo_host: etcd1
+repo_lab_ip: 192.168.105.140
+
+# Both cluster members are declared to the repo. The primary moves, so the repo
+# cannot be configured against "the primary" — it is configured against every
+# member, and pgBackRest works out which one is currently writable.
+patroni_members:
+  - { name: pgn1, ip: 192.168.105.141 }
+  - { name: pgn2, ip: 192.168.105.142 }
+
+pg_version: 18
+pg_bin_dir: /usr/pgsql-18/bin
+pg_data_dir: /var/lib/pgsql/18/data
+pg_port: 5432
+
+patroni_config: /etc/patroni/patroni.yml
+pgdg_repo_rpm: "https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+
+# ── TLS (matching part 1's dedicated repo host) ───────────────────────────────
+# pgBackRest supports SSH and TLS between repo and database hosts. This series
+# uses TLS: it needs no shell account on the peers, the authorisation is an
+# explicit CN allow-list rather than "whatever this unix user can reach", and it
+# is the transport part 1 established. Certificates are issued on the control
+# node and pushed; no guest ever generates its own.
+pgbackrest_tls_port: 8432
+pgbackrest_cert_dir: /etc/pgbackrest/certs
+pgbackrest_cert_artifact_dir: "{{ inventory_dir }}/../artifacts/certs"
+pgbackrest_cert_days: 3650
+pgbackrest_cert_subj_org: Lab
+pgbackrest_ca_cn: lab-patroni-pgbackrest-ca

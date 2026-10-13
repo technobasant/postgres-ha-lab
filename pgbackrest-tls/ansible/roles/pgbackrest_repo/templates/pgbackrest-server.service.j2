@@ -1,0 +1,15 @@
+[Unit]
+Description=pgBackRest TLS server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ pgbackrest_user }}
+Group={{ pgbackrest_group }}
+ExecStart=/usr/bin/pgbackrest server
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+# /etc/etcd/etcd.conf.yaml on etcd1 — single-member DCS for the lab.
+# Bind to the lab address, not only localhost, or Patroni on pgn1/pgn2 cannot reach it.
+name: etcd1
+data-dir: /var/lib/etcd
+listen-client-urls: http://192.168.105.140:2379,http://127.0.0.1:2379
+advertise-client-urls: http://192.168.105.140:2379
+listen-peer-urls: http://192.168.105.140:2380
+initial-advertise-peer-urls: http://192.168.105.140:2380
+initial-cluster: etcd1=http://192.168.105.140:2380
+initial-cluster-state: new
+initial-cluster-token: pg18-patroni-lab

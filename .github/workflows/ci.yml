@@ -1,0 +1,45 @@
+---
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install lint tools
+        run: |
+          python -m pip install --quiet "ansible-core==2.15.13" yamllint
+          ansible-galaxy collection install -r patroni/ansible/collections/requirements.yml
+
+      - name: yamllint
+        run: yamllint -c .yamllint.yml .
+
+      - name: ansible-playbook --syntax-check
+        run: |
+          set -euo pipefail
+          for part in pgbackrest-tls patroni; do
+            for pb in "$part"/ansible/playbooks/*.yml; do
+              echo "== $pb"
+              (cd "$part/ansible" && ansible-playbook --syntax-check "playbooks/$(basename "$pb")")
+            done
+          done
+
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          files=$(git ls-files '*.sh' '*/bin/*')
+          shellcheck $files
+
+      - name: Vagrantfile syntax
+        run: |
+          set -euo pipefail
+          for f in $(git ls-files '*Vagrantfile'); do echo "== $f"; ruby -c "$f"; done

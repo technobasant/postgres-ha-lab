@@ -1,0 +1,12 @@
+---
+extends: relaxed
+rules:
+  line-length:
+    max: 140
+  truthy: disable
+  comments-indentation: disable
+  # patroni/config aligns the authentication block in columns, as in the write-up.
+  colons:
+    max-spaces-after: -1
+  commas:
+    max-spaces-after: -1

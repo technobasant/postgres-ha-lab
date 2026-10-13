@@ -1,0 +1,142 @@
+---
+# =============================================================================
+# Wire pgBackRest into an existing Patroni cluster.
+#
+# The ordering matters and is the whole trick:
+#
+#   1. repo host  — pgBackRest installed, repo path owned by postgres, SSH
+#                   identity so the database hosts can reach it
+#   2. db hosts   — pgBackRest installed and configured against the repo
+#   3. Patroni    — archive_mode and archive_command pushed through the DCS
+#                   with `patronictl edit-config`, NOT by editing postgresql.conf
+#   4. stanza     — created against whichever member is currently leader
+#
+# Step 3 is where most integrations go wrong. Patroni owns postgresql.conf and
+# rewrites it on every restart, so a hand-edited archive_command survives until
+# the first failover and then quietly disappears — which is exactly when you
+# need it.
+# =============================================================================
+
+- name: Install pgBackRest everywhere
+  hosts: pgbackrest_repo:patroni_cluster
+  become: true
+  gather_facts: true
+  tasks:
+    - name: PGDG repository present
+      ansible.builtin.dnf:
+        name: "{{ pgdg_repo_rpm }}"
+        state: present
+        disable_gpg_check: true
+
+    - name: pgBackRest installed
+      ansible.builtin.dnf:
+        name: pgbackrest
+        state: present
+
+    - name: Record pgBackRest version
+      ansible.builtin.command: pgbackrest version
+      register: pgbr_version
+      changed_when: false
+
+    - name: Show pgBackRest version
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ pgbr_version.stdout }}"
+
+- name: Configure the repository host
+  hosts: pgbackrest_repo
+  become: true
+  gather_facts: false
+  tasks:
+    # etcd1 has no Postgres, so the postgres user does not exist there yet. The
+    # repo is owned by it anyway: pgBackRest runs as the same user on both ends
+    # and the TLS/SSH identity has to match.
+    - name: postgres group present on the repo host
+      ansible.builtin.group:
+        name: "{{ pgbackrest_group }}"
+        system: true
+
+    - name: postgres user present on the repo host
+      ansible.builtin.user:
+        name: "{{ pgbackrest_user }}"
+        group: "{{ pgbackrest_group }}"
+        system: true
+        home: /var/lib/pgsql
+        shell: /bin/bash
+        create_home: true
+
+    - name: Repo and log directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ pgbackrest_user }}"
+        group: "{{ pgbackrest_group }}"
+        mode: "0750"
+      loop:
+        - "{{ pgbackrest_repo_path }}"
+        - "{{ pgbackrest_log_path }}"
+
+    - name: Repo pgbackrest.conf
+      ansible.builtin.copy:
+        dest: "{{ pgbackrest_conf_file }}"
+        owner: "{{ pgbackrest_user }}"
+        group: "{{ pgbackrest_group }}"
+        mode: "0640"
+        content: |
+          # Managed by Ansible — 03_pgbackrest_patroni.yml
+          [global]
+          repo1-path={{ pgbackrest_repo_path }}
+          repo1-retention-full=2
+          log-path={{ pgbackrest_log_path }}
+          log-level-console=info
+          log-level-file=detail
+          start-fast=y
+
+          [{{ pgbackrest_stanza }}]
+          # Every cluster member is declared. pgBackRest probes them and uses
+          # whichever is not in recovery; that is what makes the repo survive a
+          # failover without reconfiguration.
+          {% for m in patroni_members %}
+          pg{{ loop.index }}-host={{ m.ip }}
+          pg{{ loop.index }}-host-user={{ pgbackrest_user }}
+          pg{{ loop.index }}-path={{ pg_data_dir }}
+          pg{{ loop.index }}-port={{ pg_port }}
+          {% endfor %}
+
+- name: Configure the database hosts
+  hosts: patroni_cluster
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Log and spool directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ pgbackrest_user }}"
+        group: "{{ pgbackrest_group }}"
+        mode: "0750"
+      loop:
+        - "{{ pgbackrest_log_path }}"
+        - "{{ pgbackrest_spool_path }}"
+
+    - name: Database-host pgbackrest.conf
+      ansible.builtin.copy:
+        dest: "{{ pgbackrest_conf_file }}"
+        owner: "{{ pgbackrest_user }}"
+        group: "{{ pgbackrest_group }}"
+        mode: "0640"
+        content: |
+          # Managed by Ansible — 03_pgbackrest_patroni.yml
+          [global]
+          repo1-host={{ repo_lab_ip }}
+          repo1-host-user={{ pgbackrest_user }}
+          log-path={{ pgbackrest_log_path }}
+          log-level-console=info
+          log-level-file=detail
+          # Asynchronous archiving keeps archive_command from becoming the
+          # cluster's throughput ceiling under write load.
+          archive-async=y
+          spool-path={{ pgbackrest_spool_path }}
+
+          [{{ pgbackrest_stanza }}]
+          pg1-path={{ pg_data_dir }}
+          pg1-port={{ pg_port }}

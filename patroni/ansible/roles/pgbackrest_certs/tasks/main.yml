@@ -1,0 +1,102 @@
+---
+- name: Ensure cert artifact directory on control node
+  ansible.builtin.file:
+    path: "{{ pgbackrest_cert_artifact_dir }}"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Create lab CA key
+  ansible.builtin.command:
+    cmd: >
+      openssl genrsa -out {{ pgbackrest_cert_artifact_dir }}/ca.key 4096
+    creates: "{{ pgbackrest_cert_artifact_dir }}/ca.key"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Create lab CA certificate
+  ansible.builtin.command:
+    cmd: >
+      openssl req -new -x509 -days {{ pgbackrest_cert_days }}
+      -key {{ pgbackrest_cert_artifact_dir }}/ca.key
+      -out {{ pgbackrest_cert_artifact_dir }}/ca.crt
+      -subj "/O={{ pgbackrest_cert_subj_org }}/CN={{ pgbackrest_ca_cn }}"
+    creates: "{{ pgbackrest_cert_artifact_dir }}/ca.crt"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Restrict CA key mode
+  ansible.builtin.file:
+    path: "{{ pgbackrest_cert_artifact_dir }}/ca.key"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Build host certificate list
+  ansible.builtin.set_fact:
+    pgbackrest_cert_hosts: "{{ groups['pgbackrest_repo'] + groups['patroni_cluster'] }}"
+  run_once: true
+
+- name: Generate per-host key and CSR
+  ansible.builtin.shell: |
+    set -euo pipefail
+    HOST="{{ item }}"
+    DIR="{{ pgbackrest_cert_artifact_dir }}"
+    IP="{{ hostvars[item].lab_ip }}"
+    openssl genrsa -out "${DIR}/${HOST}.key" 2048
+    openssl req -new -key "${DIR}/${HOST}.key" -out "${DIR}/${HOST}.csr" \
+      -subj "/O={{ pgbackrest_cert_subj_org }}/CN=${HOST}"
+    printf '%s\n' \
+      'basicConstraints=CA:FALSE' \
+      'keyUsage=digitalSignature,keyEncipherment' \
+      'extendedKeyUsage=serverAuth,clientAuth' \
+      "subjectAltName=DNS:${HOST},IP:${IP}" \
+      > "${DIR}/${HOST}.ext"
+    openssl x509 -req -in "${DIR}/${HOST}.csr" \
+      -CA "${DIR}/ca.crt" -CAkey "${DIR}/ca.key" -CAcreateserial \
+      -out "${DIR}/${HOST}.crt" -days {{ pgbackrest_cert_days }} \
+      -extfile "${DIR}/${HOST}.ext"
+    chmod 600 "${DIR}/${HOST}.key"
+  args:
+    creates: "{{ pgbackrest_cert_artifact_dir }}/{{ item }}.crt"
+  loop: "{{ pgbackrest_cert_hosts }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Ensure remote cert directory
+  ansible.builtin.file:
+    path: "{{ pgbackrest_cert_dir }}"
+    state: directory
+    owner: "{{ pgbackrest_user }}"
+    group: "{{ pgbackrest_group }}"
+    mode: "0750"
+
+- name: Install CA certificate
+  ansible.builtin.copy:
+    src: "{{ pgbackrest_cert_artifact_dir }}/ca.crt"
+    dest: "{{ pgbackrest_cert_dir }}/ca.crt"
+    owner: "{{ pgbackrest_user }}"
+    group: "{{ pgbackrest_group }}"
+    mode: "0644"
+
+- name: Install host certificate
+  ansible.builtin.copy:
+    src: "{{ pgbackrest_cert_artifact_dir }}/{{ inventory_hostname }}.crt"
+    dest: "{{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.crt"
+    owner: "{{ pgbackrest_user }}"
+    group: "{{ pgbackrest_group }}"
+    mode: "0644"
+
+- name: Install host private key
+  ansible.builtin.copy:
+    src: "{{ pgbackrest_cert_artifact_dir }}/{{ inventory_hostname }}.key"
+    dest: "{{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.key"
+    owner: "{{ pgbackrest_user }}"
+    group: "{{ pgbackrest_group }}"
+    mode: "0600"

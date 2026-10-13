@@ -1,0 +1,46 @@
+# {{ ansible_managed }}
+[global]
+log-level-console=info
+log-level-file=detail
+log-path={{ pgbackrest_log_path }}
+
+{% if pgbackrest_role == 'server' %}
+repo1-path={{ pgbackrest_repo_path }}
+repo1-retention-full=2
+repo1-bundle=y
+repo1-block=y
+
+# TLS server (central repo host)
+tls-server-address=*
+tls-server-port={{ pgbackrest_tls_port }}
+tls-server-cert-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.crt
+tls-server-key-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.key
+tls-server-ca-file={{ pgbackrest_cert_dir }}/ca.crt
+{% for h in groups['pgbackrest_clients'] %}
+tls-server-auth={{ h }}=*
+{% endfor %}
+{% else %}
+# Client points at dedicated TLS repo host
+repo1-host={{ backup_host }}
+repo1-host-type=tls
+repo1-host-user={{ pgbackrest_user }}
+repo1-host-cert-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.crt
+repo1-host-key-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.key
+repo1-host-ca-file={{ pgbackrest_cert_dir }}/ca.crt
+repo1-host-port={{ pgbackrest_tls_port }}
+
+# Clients also run a TLS server so the repo host can call back later
+tls-server-address=*
+tls-server-port={{ pgbackrest_tls_port }}
+tls-server-cert-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.crt
+tls-server-key-file={{ pgbackrest_cert_dir }}/{{ inventory_hostname }}.key
+tls-server-ca-file={{ pgbackrest_cert_dir }}/ca.crt
+tls-server-auth={{ backup_host }}=*
+{% endif %}
+
+[{{ pgbackrest_stanza }}]
+{% if pgbackrest_role == 'server' %}
+# Stanza paths filled when Postgres is installed (tutorial 2+)
+{% else %}
+# Placeholder until Postgres data dir exists
+{% endif %}

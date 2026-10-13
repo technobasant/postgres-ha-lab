@@ -1,0 +1,120 @@
+---
+# =============================================================================
+# Teach Patroni to archive through pgBackRest, and to rebuild replicas from it.
+#
+# Two settings, two different homes, and knowing which goes where is the point:
+#
+#   archive_mode / archive_command   -> the DCS, via `patronictl edit-config`
+#       Patroni rewrites postgresql.conf from the DCS on every start. Anything
+#       hand-edited into that file survives until the first failover.
+#
+#   create_replica_methods + the      -> the LOCAL patroni.yml
+#   pgbackrest block                     It names a command on that host, so it
+#                                        cannot live in shared cluster state.
+# =============================================================================
+
+- name: SSH trust between the repo host and the database hosts
+  hosts: pgbackrest_repo:patroni_cluster
+  become: true
+  gather_facts: false
+  tasks:
+    # pgBackRest talks repo<->database as the postgres user. Part 1 of this
+    # series used TLS; SSH is the other supported transport and is fewer moving
+    # parts when the certificate story is not what the post is about.
+    - name: postgres has a home and a shell
+      ansible.builtin.user:
+        name: "{{ pgbackrest_user }}"
+        home: /var/lib/pgsql
+        shell: /bin/bash
+
+    - name: Generate an ed25519 key for postgres
+      ansible.builtin.command:
+        cmd: ssh-keygen -t ed25519 -N '' -f /var/lib/pgsql/.ssh/id_ed25519 -q
+        creates: /var/lib/pgsql/.ssh/id_ed25519
+      become_user: "{{ pgbackrest_user }}"
+
+    - name: Read the public key
+      ansible.builtin.slurp:
+        src: /var/lib/pgsql/.ssh/id_ed25519.pub
+      register: pubkey
+
+- name: Exchange keys
+  hosts: pgbackrest_repo:patroni_cluster
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Authorize every peer's postgres key
+      ansible.posix.authorized_key:
+        user: "{{ pgbackrest_user }}"
+        key: "{{ hostvars[item].pubkey.content | b64decode }}"
+        state: present
+      loop: "{{ groups['pgbackrest_repo'] + groups['patroni_cluster'] }}"
+
+    - name: Pre-seed known_hosts so the first pgBackRest run is not a prompt
+      ansible.builtin.shell: |
+        set -o pipefail
+        install -d -m 0700 -o {{ pgbackrest_user }} -g {{ pgbackrest_group }} /var/lib/pgsql/.ssh
+        ssh-keyscan -H {{ (groups['pgbackrest_repo'] + groups['patroni_cluster'])
+                          | map('extract', hostvars, 'lab_ip') | join(' ') }} \
+          > /var/lib/pgsql/.ssh/known_hosts 2>/dev/null
+        chown {{ pgbackrest_user }}:{{ pgbackrest_group }} /var/lib/pgsql/.ssh/known_hosts
+        chmod 0600 /var/lib/pgsql/.ssh/known_hosts
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+- name: Local Patroni config — replica creation from backup
+  hosts: patroni_cluster
+  become: true
+  gather_facts: false
+  tasks:
+    # create_replica_methods names a command on THIS host, so it belongs in the
+    # local file. Order matters: pgbackrest first, basebackup as the fallback,
+    # so a new replica clones from the repo instead of dragging a full copy off
+    # the primary while it is serving traffic.
+    - name: Add pgbackrest as a replica creation method
+      ansible.builtin.blockinfile:
+        path: "{{ patroni_config }}"
+        marker: "# {mark} ANSIBLE pgbackrest replica method"
+        insertafter: '^postgresql:'
+        block: |2
+            create_replica_methods:
+              - pgbackrest
+              - basebackup
+            pgbackrest:
+              command: "/usr/bin/pgbackrest --stanza={{ pgbackrest_stanza }} --delta restore"
+              keep_data: true
+              no_params: true
+      notify: reload patroni
+
+  handlers:
+    - name: reload patroni
+      ansible.builtin.systemd:
+        name: patroni
+        state: reloaded
+
+- name: Cluster-wide archiving through the DCS
+  hosts: patroni_cluster
+  become: true
+  gather_facts: false
+  run_once: true
+  tasks:
+    - name: Push archive settings into the DCS
+      ansible.builtin.shell: |
+        set -o pipefail
+        cat <<'YML' | patronictl -c {{ patroni_config }} edit-config --force --apply -
+        postgresql:
+          parameters:
+            archive_mode: "on"
+            archive_command: "pgbackrest --stanza={{ pgbackrest_stanza }} archive-push %p"
+            archive_timeout: 60
+        YML
+      args:
+        executable: /bin/bash
+      become_user: "{{ pgbackrest_user }}"
+      register: editcfg
+      changed_when: "'not changed' not in editcfg.stdout"
+
+    - name: Show the resulting DCS config
+      ansible.builtin.debug:
+        var: editcfg.stdout_lines

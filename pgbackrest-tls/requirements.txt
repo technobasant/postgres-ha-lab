@@ -1,0 +1,3 @@
+# Use a Python 3.11/3.12 venv on the Mac control node.
+# RHEL 8 targets ship Python 3.6 → ansible-core must be < 2.16.
+ansible-core==2.15.13

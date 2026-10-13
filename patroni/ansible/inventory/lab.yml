@@ -1,0 +1,33 @@
+---
+# The Patroni cluster from part 2, plus the node that already runs etcd doing
+# double duty as the pgBackRest repository. Co-locating the DCS and the backup
+# repo is a lab economy, not a recommendation: in production they are separate
+# failure domains and the repo lives off the database hosts entirely.
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+      ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  children:
+    pgbackrest_repo:
+      hosts:
+        etcd1:
+          ansible_host: 192.168.105.140
+          ansible_user: vagrant
+          ansible_ssh_private_key_file: "{{ inventory_dir }}/../../.vagrant/machines/etcd1/qemu/private_key"
+          ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes"
+          lab_ip: 192.168.105.140
+    patroni_cluster:
+      hosts:
+        pgn1:
+          ansible_host: 192.168.105.141
+          ansible_user: vagrant
+          ansible_ssh_private_key_file: "{{ inventory_dir }}/../../.vagrant/machines/pgn1/qemu/private_key"
+          ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes"
+          lab_ip: 192.168.105.141
+        pgn2:
+          ansible_host: 192.168.105.142
+          ansible_user: vagrant
+          ansible_ssh_private_key_file: "{{ inventory_dir }}/../../.vagrant/machines/pgn2/qemu/private_key"
+          ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentitiesOnly=yes"
+          lab_ip: 192.168.105.142

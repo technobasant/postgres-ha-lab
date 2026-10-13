@@ -1,0 +1,4 @@
+---
+# Full role entrypoint (install + configure). Prefer playbook includes for cert ordering.
+- ansible.builtin.import_tasks: install.yml
+- ansible.builtin.import_tasks: configure.yml

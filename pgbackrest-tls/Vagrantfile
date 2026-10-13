@@ -1,0 +1,87 @@
+# frozen_string_literal: true
+# =============================================================================
+# RHEL 8 amd64 lab: dedicated pgBackRest TLS server + PG client nodes
+# Fabric: socket_vmnet 192.168.105.0/24 (see ../fabric)
+# App config: Ansible only. Vagrant = boot + lab NIC + /etc/hosts.
+# =============================================================================
+
+LAB_PREFIX = "192.168.105"
+
+NODES = [
+  { name: "backup1", box: "generic/rhel8", ip: "#{LAB_PREFIX}.130", ssh_port: 22130, memory: "1024", smp: "1", mac: "52:54:00:12:01:30" },
+  { name: "pg1",     box: "generic/rhel8", ip: "#{LAB_PREFIX}.131", ssh_port: 22131, memory: "1024", smp: "1", mac: "52:54:00:12:01:31" },
+  { name: "pg2",     box: "generic/rhel8", ip: "#{LAB_PREFIX}.132", ssh_port: 22132, memory: "1024", smp: "1", mac: "52:54:00:12:01:32" },
+]
+
+Vagrant.configure("2") do |config|
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+  config.vm.box_check_update = false
+  config.vm.boot_timeout = 900
+
+  NODES.each do |n|
+    config.vm.define n[:name] do |node|
+      node.vm.box = n[:box]
+      node.vm.hostname = n[:name]
+
+      node.vm.provider "qemu" do |qe|
+        qe.arch = "x86_64"
+        qe.machine = "q35"
+        qe.cpu = "max"
+        qe.smp = n[:smp]
+        qe.memory = n[:memory]
+        qe.ssh_port = n[:ssh_port]
+        qe.net_device = "virtio-net-pci"
+        qe.drive_interface = "virtio"
+        qe.qemu_dir = "/opt/homebrew/share/qemu"
+        qe.no_daemonize = true
+        qe.qemu_bin = File.join(File.dirname(__FILE__), "bin", "qemu-system-x86_64")
+        qe.extra_qemu_args = [
+          "-device", "virtio-net-pci,netdev=lab0,mac=#{n[:mac]}",
+          "-netdev", "socket,id=lab0,fd=3",
+        ]
+      end
+
+      # Lab NIC only — packages/TLS/pgBackRest come from Ansible.
+      node.vm.provision "shell", privileged: true, inline: <<-SHELL
+        set -euo pipefail
+        LAB_IP="#{n[:ip]}"
+        LAB_MAC="#{n[:mac]}"
+        IFACE=$(ip -o link | awk -v m="$LAB_MAC" 'BEGIN{IGNORECASE=1} index(tolower($0), tolower(m)){gsub(/:/,"",$2); print $2; exit}')
+        if [[ -z "$IFACE" ]]; then
+          for i in $(ls /sys/class/net | grep -vE '^(lo|docker|veth|br-)'); do
+            ADDR=$(ip -4 -o addr show dev "$i" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)
+            [[ "$ADDR" == "10.0.2.15" ]] && continue
+            IFACE="$i"
+            break
+          done
+        fi
+        [[ -n "$IFACE" ]] || { echo "ERROR: lab NIC not found"; ip -br link; exit 1; }
+        echo "Configuring $IFACE ($LAB_MAC) -> $LAB_IP/24"
+        if command -v nmcli >/dev/null 2>&1; then
+          nmcli dev set "$IFACE" managed yes || true
+          nmcli con delete "lab-${IFACE}" 2>/dev/null || true
+          nmcli con add type ethernet ifname "$IFACE" con-name "lab-${IFACE}" \\
+            ipv4.method manual ipv4.addresses "${LAB_IP}/24" \\
+            ipv4.never-default yes ipv6.method ignore connection.autoconnect yes
+          nmcli con up "lab-${IFACE}"
+        else
+          ip link set "$IFACE" up
+          ip addr flush dev "$IFACE" || true
+          ip addr add "${LAB_IP}/24" dev "$IFACE"
+        fi
+        cat >/etc/hosts.lab <<'HOSTS'
+#{NODES.map { |p| "#{p[:ip]} #{p[:name]}" }.join("\n")}
+HOSTS
+        while read -r line; do
+          grep -qF "$line" /etc/hosts || echo "$line" >> /etc/hosts
+        done < /etc/hosts.lab
+        mkdir -p /etc/lab
+        echo "$LAB_IP" > /etc/lab/ip
+        echo "$IFACE" > /etc/lab/iface
+        # Ansible over lab IP needs python3
+        dnf -y install python3 2>/dev/null || yum -y install python3 || true
+        echo "OK #{n[:name]} lab ip $LAB_IP on $IFACE"
+      SHELL
+    end
+  end
+end

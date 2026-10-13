@@ -1,0 +1,20 @@
+---
+# Shared lab defaults
+pgbackrest_user: pgbackrest
+pgbackrest_group: pgbackrest
+pgbackrest_conf_dir: /etc/pgbackrest
+pgbackrest_conf_file: /etc/pgbackrest/pgbackrest.conf
+pgbackrest_cert_dir: /etc/pgbackrest/certs
+pgbackrest_repo_path: /var/lib/pgbackrest
+pgbackrest_log_path: /var/log/pgbackrest
+pgbackrest_tls_port: 8432
+pgbackrest_stanza: demo
+# Cert artifacts live on the Ansible control node (gitignored)
+pgbackrest_cert_artifact_dir: "{{ inventory_dir }}/../artifacts/certs"
+pgbackrest_cert_days: 3650
+pgbackrest_cert_subj_org: Lab
+pgbackrest_ca_cn: lab-pgbackrest-ca
+# PGDG common repo for latest stable pgBackRest on RHEL 8
+pgdg_repo_rpm: "https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+backup_host: backup1
+backup_lab_ip: 192.168.105.130

@@ -1,0 +1,21 @@
+---
+- name: Deploy pgBackRest configuration
+  ansible.builtin.template:
+    src: pgbackrest.conf.j2
+    dest: "{{ pgbackrest_conf_file }}"
+    owner: "{{ pgbackrest_user }}"
+    group: "{{ pgbackrest_group }}"
+    mode: "0640"
+
+- name: Install systemd unit for pgBackRest TLS server
+  ansible.builtin.template:
+    src: pgbackrest-server.service.j2
+    dest: /etc/systemd/system/pgbackrest-server.service
+    mode: "0644"
+
+- name: Enable and start pgBackRest TLS server
+  ansible.builtin.systemd:
+    name: pgbackrest-server
+    enabled: true
+    state: restarted
+    daemon_reload: true

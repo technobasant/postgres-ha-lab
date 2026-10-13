@@ -1,0 +1,5 @@
+---
+# Playbooks 04 and 05 use ansible.posix (authorized_key, firewalld), which is
+# not part of ansible-core.
+collections:
+  - name: ansible.posix

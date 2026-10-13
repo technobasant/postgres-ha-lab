@@ -1,0 +1,19 @@
+#!/bin/bash
+# Close inherited fds before Vagrant/ChildProcess so lab NIC can claim fd=3.
+set -euo pipefail
+export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+# shellcheck disable=SC2010  # /dev/fd entries are plain integers; a glob gains nothing here.
+for fd in $(ls /dev/fd 2>/dev/null | grep -E '^[0-9]+$' | sort -n); do
+  if [[ "$fd" -gt 2 ]]; then
+    eval "exec ${fd}<&-" 2>/dev/null || true
+  fi
+done
+
+if [[ $# -eq 0 ]]; then
+  exec vagrant up --provider=qemu
+else
+  exec vagrant up "$@" --provider=qemu
+fi

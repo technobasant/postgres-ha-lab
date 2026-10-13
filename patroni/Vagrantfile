@@ -1,0 +1,83 @@
+# frozen_string_literal: true
+# =============================================================================
+# Rocky 8 amd64 Patroni lab — PostgreSQL 18 + etcd + HAProxy
+#
+# Guests are amd64 under QEMU TCG on Apple Silicon. Slow on purpose: the point
+# is to match the instruction set of the machines this runs on in production,
+# not to be fast. See the companion networking post for the socket_vmnet fabric.
+#
+# Rocky 8 rather than generic/rhel8: an unregistered RHEL 8 box has no BaseOS or
+# AppStream, so there is no python3.12 and PGDG's patroni-etcd will not resolve.
+# Rocky is binary-compatible and needs no subscription. On a *registered* RHEL 8
+# every command in the tutorial is identical.
+#
+# Vagrant only boots the box and wires the lab NIC. Everything else is Ansible.
+# =============================================================================
+
+LAB_PREFIX = "192.168.105"
+
+NODES = [
+  { name: "etcd1", ip: "#{LAB_PREFIX}.140", ssh_port: 22140, memory: "1024", smp: "1", mac: "52:54:00:12:01:40" },
+  { name: "pgn1",  ip: "#{LAB_PREFIX}.141", ssh_port: 22141, memory: "1536", smp: "2", mac: "52:54:00:12:01:41" },
+  { name: "pgn2",  ip: "#{LAB_PREFIX}.142", ssh_port: 22142, memory: "1536", smp: "2", mac: "52:54:00:12:01:42" },
+].freeze
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "generic/rocky8"
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+  config.vm.box_check_update = false
+  # TCG boots a RHEL-family guest slowly. The default 300s expires mid-cloud-init
+  # and Vagrant reports a timeout for a VM that is in fact still coming up.
+  config.vm.boot_timeout = 900
+
+  NODES.each do |n|
+    config.vm.define n[:name] do |node|
+      node.vm.hostname = n[:name]
+
+      node.vm.provider "qemu" do |qe|
+        qe.arch = "x86_64"
+        qe.machine = "q35"
+        qe.cpu = "max"
+        qe.smp = n[:smp]
+        qe.memory = n[:memory]
+        qe.ssh_port = n[:ssh_port]
+        qe.net_device = "virtio-net-pci"
+        qe.drive_interface = "virtio"
+        qe.qemu_dir = "/opt/homebrew/share/qemu"
+        # Do NOT daemonize: forking drops the inherited lab fd.
+        qe.no_daemonize = true
+        qe.qemu_bin = File.join(File.dirname(__FILE__), "bin", "qemu-system-x86_64")
+        qe.extra_qemu_args = [
+          "-device", "virtio-net-pci,netdev=lab0,mac=#{n[:mac]}",
+          "-netdev", "socket,id=lab0,fd=3",
+        ]
+      end
+
+      node.vm.provision "shell", privileged: true, inline: <<-SHELL
+        set -euo pipefail
+        LAB_IP="#{n[:ip]}"
+        LAB_MAC="#{n[:mac]}"
+
+        # eth0 is Vagrant's NAT (10.0.2.15). The lab NIC is the one carrying our MAC.
+        IFACE=$(ip -o link | awk -v m="$LAB_MAC" 'BEGIN{IGNORECASE=1} index(tolower($0), tolower(m)){gsub(/:/,"",$2); print $2; exit}')
+        [[ -n "$IFACE" ]] || { echo "ERROR: lab NIC not found"; ip -br link; exit 1; }
+
+        nmcli dev set "$IFACE" managed yes || true
+        nmcli con delete "lab-${IFACE}" 2>/dev/null || true
+        nmcli con add type ethernet ifname "$IFACE" con-name "lab-${IFACE}" \\
+          ipv4.method manual ipv4.addresses "${LAB_IP}/24" \\
+          ipv4.never-default yes ipv6.method ignore connection.autoconnect yes
+        nmcli con up "lab-${IFACE}"
+
+        cat >/etc/hosts.lab <<'HOSTS'
+#{NODES.map { |p| "#{p[:ip]} #{p[:name]}" }.join("\n")}
+HOSTS
+        while read -r line; do
+          grep -qF "$line" /etc/hosts || echo "$line" >> /etc/hosts
+        done < /etc/hosts.lab
+
+        echo "OK #{n[:name]} lab ip $LAB_IP on $IFACE"
+      SHELL
+    end
+  end
+end

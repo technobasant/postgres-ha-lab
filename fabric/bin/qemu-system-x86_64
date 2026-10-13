@@ -1,0 +1,22 @@
+#!/bin/bash
+# Vagrant ChildProcess leaves pipes on fds >=3. socket_vmnet_client needs a
+# clean fd 3 for the lab NIC. Close everything above stderr first.
+set -euo pipefail
+REAL_QEMU="${REAL_QEMU:-/opt/homebrew/opt/qemu/bin/qemu-system-x86_64}"
+CLIENT="${SOCKET_VMNET_CLIENT:-/opt/homebrew/opt/socket_vmnet/bin/socket_vmnet_client}"
+SOCK="${SOCKET_VMNET_SOCK:-/opt/homebrew/var/run/socket_vmnet}"
+
+if [[ ! -S "$SOCK" ]]; then
+  echo "socket_vmnet not running at $SOCK" >&2
+  echo "Start: sudo launchctl kickstart -kp system/lab.socket_vmnet" >&2
+  exit 1
+fi
+
+# shellcheck disable=SC2010  # /dev/fd entries are plain integers; a glob gains nothing here.
+for fd in $(ls /dev/fd 2>/dev/null | grep -E '^[0-9]+$' | sort -n); do
+  if [[ "$fd" -gt 2 ]]; then
+    eval "exec ${fd}<&-" 2>/dev/null || true
+  fi
+done
+
+exec "$CLIENT" "$SOCK" "$REAL_QEMU" "$@"
