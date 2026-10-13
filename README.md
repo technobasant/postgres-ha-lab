@@ -1,6 +1,6 @@
 # postgres-ha-lab
 
-A production-shaped PostgreSQL cluster on one laptop: Patroni and etcd on amd64 Rocky 8 guests, pgBackRest over mutual TLS — and the failure, rebuild and restore actually performed, with the numbers that came off the runs.
+A production-shaped PostgreSQL cluster on amd64 VMs: Patroni and etcd on amd64 Rocky 8 guests, pgBackRest over mutual TLS — and the failure, rebuild and restore actually performed, with the numbers that came off the runs.
 
 [![ci](https://github.com/technobasant/postgres-ha-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/technobasant/postgres-ha-lab/actions/workflows/ci.yml)
 
@@ -106,7 +106,7 @@ Every figure below comes from a run written up in the linked posts. Nothing here
 
 ## Limits
 
-- **One laptop.** Three to five TCG guests on one Mac. The timings are what this rig produced, not production numbers, and emulated amd64 is slow — first boot takes minutes per node.
+- **One host.** Three to five TCG guests on one Mac. The timings are what this rig produced, not production numbers, and emulated amd64 is slow — first boot takes minutes per node.
 - **One etcd member.** That is a single point of failure, and the results table shows what it costs: losing it turns the cluster read-only. Run three DCS members before any of this goes near production.
 - **The Patroni bootstrap is manual.** etcd and Patroni installation (steps 1–3 in `patroni/`) are the commands I ran, with the exact config files; they are not an Ansible playbook yet. The pgBackRest wiring is Ansible end to end.
 - **Not a hardening guide.** Lab credentials are throwaway defaults in plain text (`replpass` and `pgpass` in `patroni/config/patroni-*.yml`), HTTP for etcd, and host-key checking off for the lab subnet. Certificates are generated locally under each part's `ansible/artifacts/certs/` and are gitignored.
